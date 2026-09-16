@@ -57,8 +57,8 @@ class V3Guard(unittest.TestCase):
 
     def test_stub_never_records_authorization_value(self):
         text = (ROOT / "stub_upstream.py").read_text(encoding="utf-8")
-        self.assertIn('headers.get("Authorization") is not None', text)
-        self.assertNotIn('"authorization": headers.get("Authorization")', text)
+        self.assertIn('"authorization": headers.get("Authorization") is not None', text)
+        self.assertNotIn('"authorization": headers.get("Authorization"),', text)
         self.assertNotIn("dict(self.headers)", text)
 
     def test_safe_exec_markers_only(self):
