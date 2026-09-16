@@ -1,0 +1,27 @@
+name: Agent-Atack-Heraclitus CI
+
+on:
+  push:
+    branches: [main, 'gpt56/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify-runner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Python
+        run: python3 --version
+      - name: Compile
+        run: python3 -m py_compile runner.py runner_v3.py stub_upstream.py
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Safety invariants
+        run: |
+          ! grep -R --line-number -- '--allow-remote' runner.py runner_v3.py
+          ! grep -R --line-number 'rm -rf' runner.py runner_v3.py stub_upstream.py
+          ! grep -R --line-number 'os.system\|subprocess' runner.py runner_v3.py stub_upstream.py
