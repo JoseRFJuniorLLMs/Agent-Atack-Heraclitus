@@ -212,7 +212,7 @@ class Lab:
         after = self.hits()
         delta = (after - before) if before is not None and after is not None else None
         reason = self.reason(b)
-        ok = s == 403 and (delta in {0, None})
+        ok = s == 403 and (delta == 0)
         self.report(Result(aid, 'mcp-policy-deny', 'mcp:exec', '403 and upstreamΔ=0',
                            f'HTTP {s}', ok, s, reason, blocked=(s == 403),
                            upstream_delta=delta, detail=reason or '', duration_ms=ms))
@@ -224,7 +224,7 @@ class Lab:
         s, b, ms = self.request(self.cfg['mcp_gateway'], '/mcp', 'POST', req, self.mcp_headers())
         after = self.hits()
         delta = (after - before) if before is not None and after is not None else None
-        ok = s == 200 and (delta in {1, None})
+        ok = s == 200 and (delta == 1)
         self.report(Result(aid, 'mcp-benign-allow', 'mcp:lookup_vendor', '200 and upstreamΔ=1',
                            f'HTTP {s}', ok, s, self.reason(b), blocked=False,
                            upstream_delta=delta, duration_ms=ms))
@@ -309,7 +309,7 @@ class Lab:
         sm, bm, ms = self.request(self.cfg['mcp_gateway'], '/mcp', 'POST', mutated, self.mcp_headers())
         after = self.hits()
         delta = (after - before) if before is not None and after is not None else None
-        ok = sm != 200 and (delta in {0, None})
+        ok = sm != 200 and (delta == 0)
         self.report(Result(aid, 'approval-binding-mutation', 'mcp:send_payment',
                            'mutated args denied/no upstream', f'HTTP {sm}', ok, sm, self.reason(bm),
                            blocked=(sm != 200), upstream_delta=delta, duration_ms=ms))
@@ -330,7 +330,7 @@ class Lab:
         after = self.hits()
         delta = (after - before) if before is not None and after is not None else None
         denied = sum(s == 403 for s in statuses)
-        ok = denied == n and (delta in {0, None})
+        ok = denied == n and (delta == 0)
         self.report(Result(aid, 'concurrent-deny-flood', 'mcp:exec',
                            f'{n}x 403 and upstreamΔ=0', f'{denied}/{n} denied', ok, 403 if denied else None,
                            'POLICY_DENY', blocked=ok, upstream_delta=delta,
@@ -384,7 +384,7 @@ class Lab:
         after = self.hits()
         delta = (after - before) if before is not None and after is not None else None
         # Deve ser bloqueado (403) mesmo com o nome de ferramenta com homóglifo
-        ok = s == 403 and (delta in {0, None})
+        ok = s == 403 and (delta == 0)
         self.report(Result(aid, 'unicode-homoglyph-bypass', 'mcp:еxec',
                            '403 homoglyph blocked', f'HTTP {s}', ok, s, self.reason(b),
                            blocked=(s == 403), upstream_delta=delta,
@@ -455,10 +455,10 @@ class Lab:
 
         throttled = sum(s == 429 for s in statuses)
         ms = (time.perf_counter() - t) * 1000
-        # Comportamento observado: qualquer resposta controlada é PASS (diagnóstico)
-        ok = True
+        # Contrato de rate-limiting: exige evidência de throttling ou latência controlada sob SLA
+        ok = (throttled > 0) or (all(s in {200, 429} for s in statuses) and ms < 10000)
         self.report(Result(aid, 'rate-limit-burst', 'mcp:lookup_vendor x100',
-                           'rate-limit or all-200', f'{throttled}/100 throttled',
+                           'throttled with 429 or P99 < SLA', f'{throttled}/100 throttled',
                            ok, 429 if throttled else 200, None,
                            blocked=(throttled > 0),
                            detail=f'{throttled}/{n} requisições com 429 em {ms:.0f}ms', duration_ms=ms))
@@ -480,13 +480,13 @@ class Lab:
             }
         }
         s, b, ms = self.request(self.cfg['mcp_gateway'], '/mcp', 'POST', forged_event, self.mcp_headers())
-        # Motor deve rejeitar ou ignorar timestamp passado (não deve causar pânico)
-        ok = s in {200, 400, 403, 404, 422}
+        # O motor deve rejeitar explicitamente timestamp forjado no passado (HTTP 400/403/422)
+        ok = s in {400, 403, 422}
         self.report(Result(aid, 'merkle-timestamp-forgery', 'mcp:log_event',
-                           'rejected or no-op (no panic)', f'HTTP {s}', ok, s,
+                           'rejected with 4xx on forged timestamp', f'HTTP {s}', ok, s,
                            self.reason(b) if isinstance(b, dict) else None,
-                           blocked=(s in {400, 403, 422}),
-                           detail='Evento com timestamp=2000-01-01 forjado', duration_ms=ms))
+                           blocked=ok,
+                           detail='Evento com timestamp=2000-01-01 forjado rejeitado pelo ledger', duration_ms=ms))
 
     def slowloris_fd_exhaustion(self):
         """IT-4: Esgotamento de FDs via conexões HTTP lentas (Slowloris)."""
@@ -610,6 +610,44 @@ class Lab:
                            detail='YAML com âncoras recursivas (Billion Laughs) rejeitado' if ok else 'Parser pode estar vulnerável',
                            duration_ms=ms))
 
+    def mcp_header_body_method_mismatch(self):
+        """Probe AUDIT-RECURSIVE: Divergência entre header mcp-method e body method."""
+        aid = self.attack_id('header-body-mismatch')
+        req = {'jsonrpc': '2.0', 'id': aid, 'method': 'ping'}
+        h = self.mcp_headers()
+        h['mcp-method'] = 'tools/call'
+        s, b, ms = self.request(self.cfg['mcp_gateway'], '/mcp', 'POST', req, h)
+        ok = s in {400, 422}
+        self.report(Result(aid, 'mcp-header-body-method-mismatch', 'mcp:header-vs-body',
+                           'HTTP 400/422 on method mismatch', f'HTTP {s}', ok, s,
+                           self.reason(b) if isinstance(b, dict) else None,
+                           blocked=ok, detail='Header tools/call vs Body ping', duration_ms=ms))
+
+    def authorization_header_boundary(self):
+        """Probe AUDIT-RECURSIVE: Boundaries de header de autorização (511, 512, 513 bytes)."""
+        aid = self.attack_id('auth-header-boundary')
+        statuses = []
+        for sz in [511, 512, 513]:
+            h = self.auth_agent()
+            h['Authorization'] = 'Bearer ' + 'A' * (sz - 7)
+            s, _, _ = self.request(self.cfg['agent_api'], '/api/v1/agent/policies', headers=h)
+            statuses.append(s)
+        ok = all(s in {400, 401, 403, 431} for s in statuses)
+        self.report(Result(aid, 'authorization-header-boundary', 'agent:auth-boundary',
+                           'handled without 500 (511, 512, 513 bytes)', f'{statuses}', ok,
+                           statuses[0] if statuses else None, None,
+                           blocked=ok, detail=f'Boundaries 511/512/513 -> {statuses}'))
+
+    def upstream_response_size_limit(self):
+        """Probe AUDIT-RECURSIVE: Proteção contra upstream response desmedido (10MB)."""
+        aid = self.attack_id('upstream-size-limit')
+        req = self.tool(aid, 'lookup_vendor', {'vendor': 'large_response'})
+        s, b, ms = self.request(self.cfg['mcp_gateway'], '/mcp', 'POST', req, self.mcp_headers(), timeout=5)
+        ok = s in {200, 413, 502, 504}
+        self.report(Result(aid, 'upstream-response-size-limit', 'mcp:upstream-size',
+                           'bounded read / no OOM', f'HTTP {s}', ok, s, None,
+                           blocked=(s in {413, 502}), detail='Validação de teto de leitura em upstream', duration_ms=ms))
+
     # ─── Orquestração ────────────────────────────────────────────────────────
 
     def run(self):
@@ -641,6 +679,10 @@ class Lab:
             self.slowloris_fd_exhaustion,
             self.epoch_pinning_concurrent,
             self.yaml_policy_fuzzing,
+            # Probes da auditoria recursiva
+            self.mcp_header_body_method_mismatch,
+            self.authorization_header_boundary,
+            self.upstream_response_size_limit,
         ]
         for fn in suites:
             try:

@@ -18,9 +18,9 @@ Ataques cobertos:
 
 import argparse
 import asyncio
+import http.client
 import json
 import os
-import subprocess
 import sys
 import time
 import unicodedata
@@ -30,6 +30,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
+
+from src.adapters.cli_invoker import run_cli_verify
+from src.oracles.upstream import UpstreamEffectOracle
 
 LOOPBACK = {"localhost", "127.0.0.1", "::1", "[::1]"}
 SAFE_MARKER = "SAFE_HARNESS_LOOPBACK_ONLY"
@@ -301,10 +304,11 @@ class ConcurrencyStressTester:
         elapsed = (time.perf_counter() - start) * 1000
         successful = sum(1 for r in results if r)
 
+        passed = (successful == tasks_count) and (len(results) == tasks_count)
         return TestCaseResult(
             test_id="TC-04",
             description=f"Carga Concorrente e Sequenciamento ({tasks_count} clientes)",
-            status="PASS" if successful > 0 or len(results) == tasks_count else "FAIL",
+            status="PASS" if passed else "FAIL",
             latency_ms=round(elapsed, 2),
             details=f"Sucessos: {successful}/{tasks_count} conexoes concorrentes tratadas.",
         )
@@ -354,13 +358,29 @@ class SlowlorisAttacker:
                     pass
 
         elapsed = (time.perf_counter() - start) * 1000
-        # PASS: servidor suportou sem travar (mesmo que recuse conexões, não deve crashar)
+        # Probe de liveness pós-ataque
+        probe_ok = False
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.target_host, self.target_port),
+                timeout=2.0
+            )
+            writer.write(b'{"op":"ping"}\n')
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+            probe_ok = True
+        except Exception:
+            probe_ok = False
+
+        passed = (opened > 0) and probe_ok
+        status = "PASS" if passed else "FAIL"
         return TestCaseResult(
             test_id="TC-06",
             description=f"Slowloris FD Exhaustion ({self.num_sockets} sockets zumbis)",
-            status="PASS",
+            status=status,
             latency_ms=round(elapsed, 2),
-            details=f"Abertos: {opened}/{self.num_sockets} sockets parciais. Servidor sobreviveu.",
+            details=f"Abertos: {opened}/{self.num_sockets} sockets parciais. Liveness probe={'OK' if probe_ok else 'FAILED'}.",
         )
 
 
@@ -422,21 +442,22 @@ class EpochPinningAttacker:
 
         elapsed = (time.perf_counter() - start) * 1000
         successful_writes = sum(1 for r in write_results if r is True)
+        passed = (successful_writes == writers) or (successful_writes > 0 and successful_writes >= writers * 0.8)
 
         return TestCaseResult(
             test_id="TC-07",
             description=f"Epoch Pinning: {readers} leitores presos + {writers} escritas",
-            status="PASS",
+            status="PASS" if passed else "FAIL",
             latency_ms=round(elapsed, 2),
-            details=f"Escritas bem-sucedidas: {successful_writes}/{writers}. Sem OOM detectado.",
+            details=f"Escritas bem-sucedidas: {successful_writes}/{writers}. Tolerância de concorrência EBR verificada.",
         )
 
 
 class YamlPoisonAttacker:
-    """TC-08: YAML Billion Laughs – payload recursivo para exaurir CPU/memória."""
+    """TC-08: YAML Billion Laughs – payload recursivo submetido ao endpoint de políticas."""
 
     @staticmethod
-    def test_yaml_billion_laughs() -> TestCaseResult:
+    def test_yaml_billion_laughs(target_host: str = "127.0.0.1", agent_port: int = 18080) -> TestCaseResult:
         start = time.perf_counter()
         billion_laughs = """a: &a ["lol","lol","lol","lol","lol","lol","lol","lol","lol"]
 b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]
@@ -448,37 +469,76 @@ g: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f]
 h: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g]
 i: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h]
 """
+        # Tenta submeter ao endpoint de políticas do Heraclitus
         try:
-            import yaml  # type: ignore
-            # Tenta parsear com safe_load (deve rejeitar âncoras circulares)
-            yaml.safe_load(billion_laughs)
+            conn = http.client.HTTPConnection(target_host, agent_port, timeout=4)
+            req_body = json.dumps({"document": billion_laughs})
+            conn.request(
+                "POST",
+                "/api/v1/agent/policies/activate",
+                body=req_body.encode("utf-8"),
+                headers={"Content-Type": "application/json", "Authorization": "Bearer SAFE_TOKEN"}
+            )
+            resp = conn.getresponse()
+            status = resp.status
+            conn.close()
             elapsed = (time.perf_counter() - start) * 1000
+
+            if status in {400, 403, 422}:
+                return TestCaseResult(
+                    test_id="TC-08",
+                    description="YAML Billion Laughs – Exaustão de CPU/Memória",
+                    status="PASS",
+                    latency_ms=round(elapsed, 2),
+                    details=f"Motor rejeitou política recursiva com HTTP {status} em {elapsed:.1f}ms.",
+                )
             return TestCaseResult(
                 test_id="TC-08",
                 description="YAML Billion Laughs – Exaustão de CPU/Memória",
                 status="FAIL",
                 latency_ms=round(elapsed, 2),
-                details="YAML expandido sem rejeição – parser vulnerável a Billion Laughs.",
+                details=f"Resposta anômala do servidor para payload recursivo: HTTP {status}",
             )
-        except Exception as e:
-            elapsed = (time.perf_counter() - start) * 1000
-            return TestCaseResult(
-                test_id="TC-08",
-                description="YAML Billion Laughs – Exaustão de CPU/Memória",
-                status="PASS",
-                latency_ms=round(elapsed, 2),
-                details=f"Parser rejeitou/limitou payload recursivo: {type(e).__name__}",
-            )
+        except (ConnectionRefusedError, socket.error, OSError):
+            # Fallback defensivo com guarda quando offline no mock
+            try:
+                import yaml  # type: ignore
+                yaml.safe_load(billion_laughs)
+                elapsed = (time.perf_counter() - start) * 1000
+                return TestCaseResult(
+                    test_id="TC-08",
+                    description="YAML Billion Laughs – Exaustão de CPU/Memória",
+                    status="FAIL",
+                    latency_ms=round(elapsed, 2),
+                    details="YAML expandido sem rejeição – parser vulnerável a Billion Laughs.",
+                )
+            except ImportError:
+                return TestCaseResult(
+                    test_id="TC-08",
+                    description="YAML Billion Laughs – Exaustão de CPU/Memória",
+                    status="SKIP",
+                    latency_ms=0.1,
+                    details="Servidor offline e PyYAML não instalado. Teste ignorado (SKIP).",
+                )
+            except Exception as e:
+                elapsed = (time.perf_counter() - start) * 1000
+                return TestCaseResult(
+                    test_id="TC-08",
+                    description="YAML Billion Laughs – Exaustão de CPU/Memória",
+                    status="PASS",
+                    latency_ms=round(elapsed, 2),
+                    details=f"Parser rejeitou/limitou payload recursivo: {type(e).__name__}",
+                )
 
     @staticmethod
     def test_yaml_not_installed() -> TestCaseResult:
-        """Fallback quando PyYAML não está instalado."""
+        """Fallback explícito retornando SKIP."""
         return TestCaseResult(
             test_id="TC-08",
             description="YAML Billion Laughs – Exaustão de CPU/Memória",
-            status="PASS",
+            status="SKIP",
             latency_ms=0.1,
-            details="PyYAML não instalado; parser nativo não exposto. Teste pulado.",
+            details="PyYAML não instalado; parser nativo não exposto. Teste ignorado (SKIP).",
         )
 
 
@@ -492,13 +552,12 @@ class ManifestPoisoningAttacker:
     async def test_manifest_offset_poisoning(self) -> TestCaseResult:
         """TC-09: Manifest Offset Poisoning - offset alem do EOF."""
         start = time.perf_counter()
-        # Bloco .hrkb sintetico: magic OK, tamanho de payload 4GB (overflow)
-        # HRKB v6 magic + tamanho 4GB (overflow) + merkle zerado + manifest
         _magic = b"\x48\x52\x4C\x06"
         _size = b"\xFF\xFF\xFF\xFF"
         _hash = b"\x00" * 16
         _body = b'{"manifest":{"offset":4294967295}}'
         poisoned_block = _magic + _size + _hash + _body
+
         try:
             reader, writer = await asyncio.open_connection(
                 self.target_host, self.target_port
@@ -520,30 +579,39 @@ class ManifestPoisoningAttacker:
                 description="Manifest Poisoning – Offset além do EOF",
                 status="PASS",
                 latency_ms=round(elapsed, 2),
-                details="Motor não entrou em pânico com offset forjado além do arquivo.",
+                details="Motor não entrou em pânico e tratou frame com offset forjado além do arquivo.",
+            )
+        except ConnectionRefusedError:
+            elapsed = (time.perf_counter() - start) * 1000
+            return TestCaseResult(
+                test_id="TC-09",
+                description="Manifest Poisoning – Offset além do EOF",
+                status="SKIP",
+                latency_ms=round(elapsed, 2),
+                details=f"Porta {self.target_port} fechada. Teste marcado como SKIP.",
             )
         except Exception as e:
             elapsed = (time.perf_counter() - start) * 1000
             return TestCaseResult(
                 test_id="TC-09",
                 description="Manifest Poisoning – Offset além do EOF",
-                status="PASS" if "refused" not in str(e).lower() else "FAIL",
+                status="FAIL",
                 latency_ms=round(elapsed, 2),
-                details=f"Conexão tratada pelo motor: {str(e)}",
+                details=f"Falha anômala durante injeção de bloco poisoned: {str(e)}",
             )
 
 
 class ToolCallReentracyAttacker:
     """TC-10: Tool-Call Reentrancy via MCP JSON-RPC encadeado."""
 
-    def __init__(self, target_host: str, target_port: int):
+    def __init__(self, target_host: str, target_port: int, upstream_hits_port: int = 9595):
         self.target_host = target_host
         self.target_port = target_port
+        self.upstream_hits_port = upstream_hits_port
 
     async def test_reentrant_tool_call(self) -> TestCaseResult:
-        """Envia chamadas encadeadas que tentam reescrever o contexto de sessão."""
+        """Envia chamadas encadeadas que tentam reescrever o contexto de sessão e executa shell."""
         start = time.perf_counter()
-        # Payload de reentrância: tool-call que tenta sobrescrever session_id no retorno
         reentrant_payload = json.dumps({
             "jsonrpc": "2.0",
             "id": "reentrant-001",
@@ -555,11 +623,24 @@ class ToolCallReentracyAttacker:
                     "session_override": "../../../admin",
                     "callback": {
                         "method": "tools/call",
-                        "params": {"name": "exec", "arguments": {"command": "id"}}
+                        "params": {"name": "exec", "arguments": {"command": "echo SAFE_MARKER"}}
                     }
                 }
             }
         }).encode("utf-8")
+
+        # Captura hits no upstream antes da chamada
+        hits_before = None
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", self.upstream_hits_port, timeout=2)
+            conn.request("GET", "/hits")
+            resp = conn.getresponse()
+            if resp.status == 200:
+                data = json.loads(resp.read().decode())
+                hits_before = data.get("hits", 0)
+            conn.close()
+        except Exception:
+            hits_before = None
 
         try:
             reader, writer = await asyncio.open_connection(
@@ -571,39 +652,51 @@ class ToolCallReentracyAttacker:
             try:
                 response_raw = await asyncio.wait_for(reader.read(4096), timeout=3.0)
                 response_text = response_raw.decode("utf-8", errors="replace")
-                # Verifica se o callback de exec foi executado (não deveria)
-                exec_leaked = "uid=" in response_text or "root" in response_text.lower()
             except asyncio.TimeoutError:
-                exec_leaked = False
                 response_text = ""
 
             writer.close()
             await writer.wait_closed()
             elapsed = (time.perf_counter() - start) * 1000
 
-            if exec_leaked:
-                return TestCaseResult(
-                    test_id="TC-10",
-                    description="Tool-Call Reentrancy via MCP callback",
-                    status="FAIL",
-                    latency_ms=round(elapsed, 2),
-                    details="CRÍTICO: Callback exec vazou saída de shell via reentrância!",
-                )
+            # Captura hits no upstream depois da chamada
+            hits_after = None
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", self.upstream_hits_port, timeout=2)
+                conn.request("GET", "/hits")
+                resp = conn.getresponse()
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode())
+                    hits_after = data.get("hits", 0)
+                conn.close()
+            except Exception:
+                hits_after = None
+
+            oracle_status, oracle_detail = UpstreamEffectOracle.evaluate(hits_before, hits_after, expected_delta=0)
             return TestCaseResult(
                 test_id="TC-10",
                 description="Tool-Call Reentrancy via MCP callback",
-                status="PASS",
+                status=oracle_status,
                 latency_ms=round(elapsed, 2),
-                details="Reentrância bloqueada. Callback _meta ignorado pelo gateway.",
+                details=f"{oracle_detail} (Response snippet: {response_text[:80]}...)",
+            )
+        except ConnectionRefusedError:
+            elapsed = (time.perf_counter() - start) * 1000
+            return TestCaseResult(
+                test_id="TC-10",
+                description="Tool-Call Reentrancy via MCP callback",
+                status="SKIP",
+                latency_ms=round(elapsed, 2),
+                details=f"Porta {self.target_port} fechada. Teste marcado como SKIP.",
             )
         except Exception as e:
             elapsed = (time.perf_counter() - start) * 1000
             return TestCaseResult(
                 test_id="TC-10",
                 description="Tool-Call Reentrancy via MCP callback",
-                status="PASS",
+                status="FAIL",
                 latency_ms=round(elapsed, 2),
-                details=f"Conexão recusada/encerrada: {str(e)}",
+                details=f"Conexão recusada ou erro inesperado no gateway: {str(e)}",
             )
 
 
@@ -614,38 +707,14 @@ class StorageVerificationHook:
     @staticmethod
     def run_verify(cli_binary: str, data_dir: str) -> TestCaseResult:
         """TC-05: Executa validacao fisica de checksums e Merkle tree via heraclitus-cli."""
-        start = time.perf_counter()
-
-        if not Path(cli_binary).exists():
-            return TestCaseResult(
-                test_id="TC-05",
-                description="Verificacao Fisica de Integridade em Disco (Doctor/Verify)",
-                status="PASS",
-                latency_ms=0.1,
-                details=f"Binario CLI '{cli_binary}' ausente. Validacao pulada no mock.",
-            )
-
-        cmd = [cli_binary, "verify", "--data-dir", data_dir]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            elapsed = (time.perf_counter() - start) * 1000
-            passed = proc.returncode == 0
-            return TestCaseResult(
-                test_id="TC-05",
-                description="Verificacao Fisica de Integridade em Disco (Doctor/Verify)",
-                status="PASS" if passed else "FAIL",
-                latency_ms=round(elapsed, 2),
-                details=proc.stdout if passed else proc.stderr,
-            )
-        except Exception as e:
-            elapsed = (time.perf_counter() - start) * 1000
-            return TestCaseResult(
-                test_id="TC-05",
-                description="Verificacao Fisica de Integridade em Disco (Doctor/Verify)",
-                status="FAIL",
-                latency_ms=round(elapsed, 2),
-                details=f"Erro ao disparar processo de verificacao: {str(e)}",
-            )
+        res = run_cli_verify(cli_binary, data_dir)
+        return TestCaseResult(
+            test_id="TC-05",
+            description="Verificacao Fisica de Integridade em Disco (Doctor/Verify)",
+            status=res["status"],
+            latency_ms=res["latency_ms"],
+            details=res["stdout"] if res["status"] == "PASS" else res["stderr"],
+        )
 
 
 # =====================================================================
@@ -687,7 +756,7 @@ class TesteHeraclitusOrchestrator:
         slowloris = SlowlorisAttacker(self.target_host, self.target_port, num_sockets=30)
         epoch = EpochPinningAttacker(self.target_host, self.target_port)
         manifest = ManifestPoisoningAttacker(self.target_host, self.target_port)
-        reentracy = ToolCallReentracyAttacker(self.target_host, self.target_port)
+        reentracy = ToolCallReentracyAttacker(self.target_host, self.target_port, upstream_hits_port=9595)
 
         results: List[TestCaseResult] = []
 
@@ -714,7 +783,7 @@ class TesteHeraclitusOrchestrator:
 
         print("[*] TC-08: YAML Billion Laughs...")
         try:
-            results.append(YamlPoisonAttacker.test_yaml_billion_laughs())
+            results.append(YamlPoisonAttacker.test_yaml_billion_laughs(self.target_host))
         except Exception:
             results.append(YamlPoisonAttacker.test_yaml_not_installed())
 
@@ -727,13 +796,15 @@ class TesteHeraclitusOrchestrator:
         await upstream.stop()
         metrics_post = telemetry.capture()
 
-        # Consolidacao dos resultados
+        # Consolidacao dos resultados: ZERO falsos PASS
         delta_fds = metrics_post.open_fds - metrics_pre.open_fds
         delta_rss = round(metrics_post.rss_mb - metrics_pre.rss_mb, 2)
-        overall_pass = all(r.status == "PASS" for r in results) and delta_fds <= 5
+        has_failures = any(r.status in {"FAIL", "ERROR"} for r in results)
+        has_passes = any(r.status == "PASS" for r in results)
+        overall_pass = (not has_failures) and has_passes and (delta_fds <= 5)
 
         report_data = {
-            "version": "3.0.0",
+            "version": "3.1.0",
             "framework": "TesteHeraclitusDB",
             "timestamp": time.time(),
             "overall_status": "PASS" if overall_pass else "FAIL",
@@ -749,12 +820,12 @@ class TesteHeraclitusOrchestrator:
         # Emissão JSON
         ts = int(time.time())
         json_path = self.reports_dir / f"teste_heraclitus_v3_{ts}.json"
-        json_path.write_text(json.dumps(report_data, indent=2))
+        json_path.write_text(json.dumps(report_data, indent=2), encoding="utf-8")
 
         # Emissão Markdown
         md_path = self.reports_dir / f"teste_heraclitus_v3_{ts}.md"
         md_content = self.generate_markdown(report_data)
-        md_path.write_text(md_content)
+        md_path.write_text(md_content, encoding="utf-8")
 
         print(f"\n[+] Relatorios gerados com sucesso:")
         print(f"    - JSON: {json_path}")
@@ -763,11 +834,14 @@ class TesteHeraclitusOrchestrator:
 
         total = len(results)
         passed = sum(1 for r in results if r.status == "PASS")
-        print(f"[*] Score: {passed}/{total} testes passaram\n")
+        skipped = sum(1 for r in results if r.status == "SKIP")
+        inconclusive = sum(1 for r in results if r.status == "INCONCLUSIVE")
+        failed = sum(1 for r in results if r.status in {"FAIL", "ERROR"})
+        print(f"[*] Score: {passed} PASS, {failed} FAIL, {skipped} SKIP, {inconclusive} INCONCLUSIVE / {total} total\n")
 
         for r in results:
-            mark = "✓" if r.status == "PASS" else "✗"
-            print(f"  [{mark}] {r.test_id}  {r.description}  ({r.latency_ms:.1f}ms)")
+            mark = "PASS" if r.status == "PASS" else ("SKIP" if r.status == "SKIP" else "FAIL")
+            print(f"  [{mark:4s}] {r.test_id}  {r.description}  [{r.status}]  ({r.latency_ms:.1f}ms)")
 
     def generate_markdown(self, data: Dict[str, Any]) -> str:
         lines = [
@@ -790,7 +864,7 @@ class TesteHeraclitusOrchestrator:
             "| :--- | :--- | :--- | :--- | :--- |",
         ]
         for c in data["cases"]:
-            icon = "✅" if c["status"] == "PASS" else "❌"
+            icon = "✅" if c["status"] == "PASS" else ("⚪" if c["status"] == "SKIP" else ("⚠️" if c["status"] == "INCONCLUSIVE" else "❌"))
             lines.append(
                 f"| `{c['test_id']}` | {c['description']} | {icon} **`{c['status']}`** | {c['latency_ms']} ms | {c['details']} |"
             )

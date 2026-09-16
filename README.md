@@ -14,17 +14,26 @@ O runner encerra antes de qualquer teste se um endpoint não for `localhost`, `1
 
 ```
 Agent-Atack-Heraclitus/
-├── runner.py              ← Harness adversarial principal (v2.0 — 22 ataques)
-├── runner_v3.py           ← Harness de resiliência e telemetria (v3.0 — 10 TCs assíncronos)
+├── runner_v4.py           ← Super Runner unificado de Caos e Resiliência (v4.0)
+├── runner_v3.py           ← Harness de resiliência e telemetria v3.1 (sem falsos PASS)
+├── runner.py              ← Harness adversarial principal (25 probes auditados)
+├── massive_v2.py          ← Campanha massive-v2 portada da PR #25 (2048 denies, 256 IDs, approval race)
+├── massive_v3.py          ← Campanha massive-v3 portada da PR #25 (deep JSON 300, dup keys, 128-way race)
 ├── stub_upstream.py       ← Mock MCP upstream com modos adversariais
 ├── config.example.json    ← Configuração de exemplo
-├── run_demo.sh            ← Script de demo rápido
+├── profiles/              ← Perfis operacionais (smoke, full, destructive)
+├── src/
+│   ├── adapters/          ← Invoker isolado para heraclitus-cli doctor/verify
+│   ├── oracles/           ← Oráculos de Durabilidade, Upstream, Merkle e Replay
+│   └── chaos/             ← Módulos de injeção física (Bitrot, Torn Write, EBR, Raft, Fuzzing)
 ├── tests/
 │   ├── test_guard.py          ← Guardrails, loopback, Unicode, presença de vetores
 │   ├── test_reporting.py      ← Geração e validação de relatórios JSON/Markdown
-│   └── test_v3.py             ← Guardrails do harness v3 (AdvancedLab)
+│   ├── test_v3.py             ← Guardrails do harness v3
+│   └── test_harness_behavior.py ← Testes comportamentais e testes negativos (anti-falso PASS)
 ├── docs/
 │   ├── AUDIT-RECURSIVE.md     ← Achados A1–A12 da auditoria recursiva v3
+│   ├── MASSIVE-V2.md          ← Especificação da campanha massiva v2/v3
 │   └── ROADMAP.md             ← Matriz de prioridades e lacunas por iteração
 └── reports/               ← Relatórios gerados em runtime (JSON + Markdown)
 ```

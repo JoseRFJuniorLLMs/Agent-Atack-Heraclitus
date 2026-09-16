@@ -1,0 +1,10 @@
+{
+  "profile": "full",
+  "concurrency_tasks": 64,
+  "slowloris_sockets": 50,
+  "epoch_pinning_writers": 500,
+  "target_host": "127.0.0.1",
+  "target_port": 9000,
+  "cli_binary": "./target/release/heraclitus-cli",
+  "data_dir": "./data"
+}

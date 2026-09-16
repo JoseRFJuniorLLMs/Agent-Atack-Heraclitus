@@ -1,0 +1,12 @@
+{
+  "profile": "destructive",
+  "concurrency_tasks": 128,
+  "slowloris_sockets": 100,
+  "epoch_pinning_writers": 2000,
+  "bitrot_enabled": true,
+  "torn_write_enabled": true,
+  "target_host": "127.0.0.1",
+  "target_port": 9000,
+  "cli_binary": "./target/release/heraclitus-cli",
+  "data_dir": "./data"
+}

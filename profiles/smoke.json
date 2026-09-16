@@ -1,0 +1,10 @@
+{
+  "profile": "smoke",
+  "concurrency_tasks": 10,
+  "slowloris_sockets": 10,
+  "epoch_pinning_writers": 50,
+  "target_host": "127.0.0.1",
+  "target_port": 9000,
+  "cli_binary": "./target/release/heraclitus-cli",
+  "data_dir": "./data"
+}
