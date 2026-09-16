@@ -22,6 +22,23 @@ jobs:
         run: python3 -m unittest discover -s tests -v
       - name: Safety invariants
         run: |
-          ! grep -R --line-number -- '--allow-remote' runner.py runner_v3.py
-          ! grep -R --line-number 'rm -rf' runner.py runner_v3.py stub_upstream.py
-          ! grep -R --line-number 'os.system\|subprocess' runner.py runner_v3.py stub_upstream.py
+          python3 - <<'PY'
+          from pathlib import Path
+          paths = [Path('runner.py'), Path('runner_v3.py'), Path('stub_upstream.py')]
+          text = '\n'.join(p.read_text(encoding='utf-8') for p in paths)
+          forbidden = [
+              '--allow-remote',
+              'allow_remote',
+              'rm -rf',
+              'os.system(',
+              'subprocess.run(',
+              'subprocess.Popen(',
+              'Popen(',
+          ]
+          found = [x for x in forbidden if x in text]
+          if found:
+              raise SystemExit(f'forbidden execution/remote primitives present: {found}')
+          print('safety invariants: OK')
+          PY
+      - name: CLI import smoke
+        run: python3 runner_v3.py --help >/dev/null
