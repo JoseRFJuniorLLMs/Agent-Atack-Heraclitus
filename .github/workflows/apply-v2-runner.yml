@@ -1,0 +1,44 @@
+name: Apply exact v2 runner
+
+on:
+  push:
+    branches:
+      - gpt56/v2-multi-agent-lab
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: gpt56/v2-multi-agent-lab
+          fetch-depth: 0
+
+      - name: Materialize exact validated runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .payload/runner.py.gz.b64.* | base64 -d | gzip -d > runner.py
+          actual="$(git hash-object runner.py)"
+          expected="29e3bf920d98e5008f8f17746393a70613af9ee8"
+          echo "runner blob: ${actual}"
+          test "${actual}" = "${expected}"
+          python3 -m unittest discover -s tests -v
+          python3 -m py_compile runner.py stub_upstream.py
+
+      - name: Commit exact runner and remove staging payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .payload
+          rm .github/workflows/apply-v2-runner.yml
+          git config user.name "GPT-5.6 Sol"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(v2): materialize exact validated runner"
+          git push origin HEAD:gpt56/v2-multi-agent-lab
