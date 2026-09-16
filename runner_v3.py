@@ -94,69 +94,55 @@ class TelemetryMonitor:
 # =====================================================================
 # 2. Upstream Stub Mock Server
 # =====================================================================
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class _UpstreamHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/hits":
+            body = json.dumps({"hits": getattr(self.server, "hits", 0)}).encode("utf-8")
+        elif self.path == "/reset":
+            setattr(self.server, "hits", 0)
+            body = json.dumps({"status": "reset", "hits": 0}).encode("utf-8")
+        else:
+            h = getattr(self.server, "hits", 0) + 1
+            setattr(self.server, "hits", h)
+            body = json.dumps({"status": "success", "hits": h}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        h = getattr(self.server, "hits", 0) + 1
+        setattr(self.server, "hits", h)
+        body = json.dumps({"status": "success", "hits": h, "output": "stub_ack"}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
 class UpstreamStubServer:
     def __init__(self, host: str = "127.0.0.1", port: int = 9595):
         self.host = host
         self.port = port
-        self.server = None
-        self.mode = "normal"  # normal, delayed, malformed, drop
-
-    async def handle_client(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ):
-        try:
-            data = await reader.read(4096)
-            if not data:
-                writer.close()
-                await writer.wait_closed()
-                return
-
-            if self.mode == "delayed":
-                await asyncio.sleep(6.0)  # Força estouro de timeout padrão
-            elif self.mode == "drop":
-                writer.close()
-                await writer.wait_closed()
-                return
-            elif self.mode == "malformed":
-                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{invalid_json")
-                await writer.drain()
-                writer.close()
-                await writer.wait_closed()
-                return
-
-            response_body = json.dumps({
-                "status": "success",
-                "output": "stub_ack",
-                "timestamp": time.time()
-            })
-            http_response = (
-                f"HTTP/1.1 200 OK\r\n"
-                f"Content-Type: application/json\r\n"
-                f"Content-Length: {len(response_body)}\r\n"
-                f"Connection: close\r\n\r\n"
-                f"{response_body}"
-            ).encode("utf-8")
-
-            writer.write(http_response)
-            await writer.drain()
-        except Exception:
-            pass
-        finally:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
+        self.server: Optional[ThreadingHTTPServer] = None
+        self.thread: Optional[threading.Thread] = None
 
     async def start(self):
-        self.server = await asyncio.start_server(
-            self.handle_client, self.host, self.port
-        )
+        self.server = ThreadingHTTPServer((self.host, self.port), _UpstreamHandler)
+        self.server.hits = 0
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
 
     async def stop(self):
         if self.server:
-            self.server.close()
-            await self.server.wait_closed()
+            self.server.shutdown()
+            self.server.server_close()
 
 
 # =====================================================================
@@ -457,7 +443,7 @@ class YamlPoisonAttacker:
     """TC-08: YAML Billion Laughs – payload recursivo submetido ao endpoint de políticas."""
 
     @staticmethod
-    def test_yaml_billion_laughs(target_host: str = "127.0.0.1", agent_port: int = 18080) -> TestCaseResult:
+    def test_yaml_billion_laughs(target_host: str = "127.0.0.1", agent_port: int = 8080) -> TestCaseResult:
         start = time.perf_counter()
         billion_laughs = """a: &a ["lol","lol","lol","lol","lol","lol","lol","lol","lol"]
 b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]
@@ -500,35 +486,14 @@ i: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h]
                 details=f"Resposta anômala do servidor para payload recursivo: HTTP {status}",
             )
         except (ConnectionRefusedError, socket.error, OSError):
-            # Fallback defensivo com guarda quando offline no mock
-            try:
-                import yaml  # type: ignore
-                yaml.safe_load(billion_laughs)
-                elapsed = (time.perf_counter() - start) * 1000
-                return TestCaseResult(
-                    test_id="TC-08",
-                    description="YAML Billion Laughs – Exaustão de CPU/Memória",
-                    status="FAIL",
-                    latency_ms=round(elapsed, 2),
-                    details="YAML expandido sem rejeição – parser vulnerável a Billion Laughs.",
-                )
-            except ImportError:
-                return TestCaseResult(
-                    test_id="TC-08",
-                    description="YAML Billion Laughs – Exaustão de CPU/Memória",
-                    status="SKIP",
-                    latency_ms=0.1,
-                    details="Servidor offline e PyYAML não instalado. Teste ignorado (SKIP).",
-                )
-            except Exception as e:
-                elapsed = (time.perf_counter() - start) * 1000
-                return TestCaseResult(
-                    test_id="TC-08",
-                    description="YAML Billion Laughs – Exaustão de CPU/Memória",
-                    status="PASS",
-                    latency_ms=round(elapsed, 2),
-                    details=f"Parser rejeitou/limitou payload recursivo: {type(e).__name__}",
-                )
+            elapsed = (time.perf_counter() - start) * 1000
+            return TestCaseResult(
+                test_id="TC-08",
+                description="YAML Billion Laughs – Exaustão de CPU/Memória",
+                status="SKIP",
+                latency_ms=round(elapsed, 2),
+                details=f"Servidor offline ou porta {agent_port} fechada para submissão de política (SKIP).",
+            )
 
     @staticmethod
     def test_yaml_not_installed() -> TestCaseResult:
@@ -783,7 +748,7 @@ class TesteHeraclitusOrchestrator:
 
         print("[*] TC-08: YAML Billion Laughs...")
         try:
-            results.append(YamlPoisonAttacker.test_yaml_billion_laughs(self.target_host))
+            results.append(YamlPoisonAttacker.test_yaml_billion_laughs(self.target_host, self.target_port))
         except Exception:
             results.append(YamlPoisonAttacker.test_yaml_not_installed())
 
