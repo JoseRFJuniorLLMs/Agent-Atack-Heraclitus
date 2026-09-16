@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""MCP upstream sintético e inofensivo para o laboratório HeraclitusDB.
+"""MCP upstream sintético e inofensivo para o laboratório HeraclitusDB v3.
 
-Não executa shell, filesystem, rede externa nem subprocessos. Conta chamadas e
-injeta respostas sintéticas para provar se o Gateway encaminhou uma ação.
+Não executa shell, filesystem, rede externa nem subprocessos. Conta chamadas,
+registra somente PRESENÇA de alguns headers de fronteira e injeta respostas
+sintéticas para provar se o Gateway encaminhou uma ação. Nunca guarda valores
+de Authorization ou outros segredos.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ LOCK = threading.Lock()
 HITS = 0
 BY_METHOD = Counter()
 BY_TOOL = Counter()
-LAST = deque(maxlen=64)
+LAST = deque(maxlen=128)
 
 
 def snapshot():
@@ -30,11 +32,25 @@ def snapshot():
         }
 
 
+def header_presence(headers):
+    """Somente booleans. O stub nunca persiste o valor de uma credencial."""
+    return {
+        "authorization": headers.get("Authorization") is not None,
+        "proxy-authorization": headers.get("Proxy-Authorization") is not None,
+        "x-redteam-hop": headers.get("X-Redteam-Hop") is not None,
+        "x-heraclitus-agent": headers.get("X-Heraclitus-Agent") is not None,
+        "x-heraclitus-run": headers.get("X-Heraclitus-Run") is not None,
+        "x-heraclitus-user": headers.get("X-Heraclitus-User") is not None,
+        "x-heraclitus-server": headers.get("X-Heraclitus-Server") is not None,
+    }
+
+
 def record(req, headers):
     global HITS
     method = req.get("method") if isinstance(req, dict) else None
     params = req.get("params") if isinstance(req, dict) else None
     tool = params.get("name") if isinstance(params, dict) else None
+    rid = req.get("id") if isinstance(req, dict) else None
     with LOCK:
         HITS += 1
         if method:
@@ -44,10 +60,10 @@ def record(req, headers):
         LAST.append(
             {
                 "n": HITS,
+                "id": rid,
                 "method": method,
                 "tool": tool,
-                "agent": headers.get("X-Heraclitus-Agent"),
-                "run": headers.get("X-Heraclitus-Run"),
+                "headers": header_presence(headers),
             }
         )
         return HITS
@@ -63,7 +79,7 @@ def reset():
 
 
 class H(BaseHTTPRequestHandler):
-    server_version = "HeraclitusSafeMCPStub/2"
+    server_version = "HeraclitusSafeMCPStub/3"
 
     def log_message(self, fmt, *args):
         pass
@@ -74,7 +90,11 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # O Gateway pode fechar a conexão quando atinge o limite configurado.
+            pass
 
     def do_GET(self):
         if self.path == "/hits":
@@ -102,7 +122,9 @@ class H(BaseHTTPRequestHandler):
                 if not isinstance(item, dict):
                     continue
                 record(item, self.headers)
-                rows.append({"jsonrpc": "2.0", "id": item.get("id"), "result": {"stub": True}})
+                rows.append(
+                    {"jsonrpc": "2.0", "id": item.get("id"), "result": {"stub": True}}
+                )
             return self.out(200, rows)
 
         if not isinstance(req, dict):
@@ -132,6 +154,23 @@ class H(BaseHTTPRequestHandler):
                             },
                         },
                     )
+                if vendor == "__stub_too_large__":
+                    # Pouco acima do limite de 8 MiB usado pelo Gateway. É
+                    # propositalmente finito para validar o gate sem estressar
+                    # a máquina de desenvolvimento de forma irresponsável.
+                    return self.out(
+                        200,
+                        {
+                            "jsonrpc": "2.0",
+                            "id": rid,
+                            "result": {
+                                "content": [
+                                    {"type": "text", "text": "Y" * (9 * 1024 * 1024)}
+                                ],
+                                "external_effect_id": f"stub-too-large-{seq}",
+                            },
+                        },
+                    )
                 result = {
                     "content": [{"type": "text", "text": "synthetic vendor ok"}],
                     "external_effect_id": f"stub-read-{seq}",
@@ -144,7 +183,10 @@ class H(BaseHTTPRequestHandler):
             else:
                 result = {"content": [{"type": "text", "text": "stub tool response"}]}
             return self.out(200, {"jsonrpc": "2.0", "id": rid, "result": result})
-        return self.out(200, {"jsonrpc": "2.0", "id": rid, "result": {"stub": True, "method": method}})
+        return self.out(
+            200,
+            {"jsonrpc": "2.0", "id": rid, "result": {"stub": True, "method": method}},
+        )
 
 
 def main():
@@ -155,7 +197,7 @@ def main():
     if args.bind not in {"127.0.0.1", "::1", "localhost"}:
         raise SystemExit("stub recusou bind não-loopback")
     print(
-        f"SAFE MCP stub v2 em http://{args.bind}:{args.port}  hits=/hits stats=/stats",
+        f"SAFE MCP stub v3 em http://{args.bind}:{args.port}  hits=/hits stats=/stats",
         flush=True,
     )
     ThreadingHTTPServer((args.bind, args.port), H).serve_forever()

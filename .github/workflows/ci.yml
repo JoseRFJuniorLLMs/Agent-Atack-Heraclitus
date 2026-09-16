@@ -1,0 +1,44 @@
+name: Agent-Atack-Heraclitus CI
+
+on:
+  push:
+    branches: [main, 'gpt56/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify-runner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Python
+        run: python3 --version
+      - name: Compile
+        run: python3 -m py_compile runner.py runner_v3.py stub_upstream.py
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Safety invariants
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          paths = [Path('runner.py'), Path('runner_v3.py'), Path('stub_upstream.py')]
+          text = '\n'.join(p.read_text(encoding='utf-8') for p in paths)
+          forbidden = [
+              '--allow-remote',
+              'allow_remote',
+              'rm -rf',
+              'os.system(',
+              'subprocess.run(',
+              'subprocess.Popen(',
+              'Popen(',
+          ]
+          found = [x for x in forbidden if x in text]
+          if found:
+              raise SystemExit(f'forbidden execution/remote primitives present: {found}')
+          print('safety invariants: OK')
+          PY
+      - name: CLI import smoke
+        run: python3 runner_v3.py --help >/dev/null
