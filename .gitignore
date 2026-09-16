@@ -1,5 +1,31 @@
+# Python
 __pycache__/
 *.py[cod]
-reports/
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
 .env
 .venv/
+venv/
+env/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.lcov
+
+# Reports (gerados em runtime)
+reports/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

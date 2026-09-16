@@ -14,15 +14,19 @@ O runner encerra antes de qualquer teste se um endpoint não for `localhost`, `1
 
 ```
 Agent-Atack-Heraclitus/
-├── runner.py           ← Harness adversarial principal (v2.0 — 22 ataques)
-├── runner_v3.py        ← Harness de resiliência e telemetria (v3.0 — 10 TCs assíncronos)
-├── stub_upstream.py    ← Mock MCP upstream com modos adversariais
-├── config.example.json ← Configuração de exemplo
-├── run_demo.sh         ← Script de demo rápido
+├── runner.py              ← Harness adversarial principal (v2.0 — 22 ataques)
+├── runner_v3.py           ← Harness de resiliência e telemetria (v3.0 — 10 TCs assíncronos)
+├── stub_upstream.py       ← Mock MCP upstream com modos adversariais
+├── config.example.json    ← Configuração de exemplo
+├── run_demo.sh            ← Script de demo rápido
 ├── tests/
-│   ├── test_guard.py       ← Testes de guardrails, loopback e Unicode
-│   └── test_reporting.py   ← Testes de geração e validação de relatórios
-└── reports/            ← Relatórios gerados (JSON + Markdown)
+│   ├── test_guard.py          ← Guardrails, loopback, Unicode, presença de vetores
+│   ├── test_reporting.py      ← Geração e validação de relatórios JSON/Markdown
+│   └── test_v3.py             ← Guardrails do harness v3 (AdvancedLab)
+├── docs/
+│   ├── AUDIT-RECURSIVE.md     ← Achados A1–A12 da auditoria recursiva v3
+│   └── ROADMAP.md             ← Matriz de prioridades e lacunas por iteração
+└── reports/               ← Relatórios gerados em runtime (JSON + Markdown)
 ```
 
 ---

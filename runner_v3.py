@@ -29,6 +29,10 @@ import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
+
+LOOPBACK = {"localhost", "127.0.0.1", "::1", "[::1]"}
+SAFE_MARKER = "SAFE_HARNESS_LOOPBACK_ONLY"
 
 
 # =====================================================================
@@ -486,22 +490,15 @@ class ManifestPoisoningAttacker:
         self.target_port = target_port
 
     async def test_manifest_offset_poisoning(self) -> TestCaseResult:
-        """Envia payload com offset além do EOF para testar validação do motor."""
+        """TC-09: Manifest Offset Poisoning - offset alem do EOF."""
         start = time.perf_counter()
-        # Bloco .hrkb sintético: magic OK, mas tamanho de payload divergente (0xDEADBEEF)
-        poisoned_block = (
-            b"\xHE\xRA\xCL\x06"  # magic bytes hipotéticos v6
-            b"\xFF\xFF\xFF\xFF"  # tamanho declarado: 4GB (além do EOF)
-            b"\x00" * 16         # hash zerado
-            b'{"manifest":{"offset":4294967295,"entries":[]}}'
-        )
-        # Substitui bytes inválidos de escape
-        poisoned_block = (
-            b"\x48\x52\x4C\x06"  # HRKB v6 magic (ASCII HRL + version)
-            b"\xFF\xFF\xFF\xFF"  # tamanho: 4294967295 bytes (overflow)
-            b"\x00" * 16         # merkle root zerado
-            b'{"manifest":{"offset":4294967295}}'
-        )
+        # Bloco .hrkb sintetico: magic OK, tamanho de payload 4GB (overflow)
+        # HRKB v6 magic + tamanho 4GB (overflow) + merkle zerado + manifest
+        _magic = b"\x48\x52\x4C\x06"
+        _size = b"\xFF\xFF\xFF\xFF"
+        _hash = b"\x00" * 16
+        _body = b'{"manifest":{"offset":4294967295}}'
+        poisoned_block = _magic + _size + _hash + _body
         try:
             reader, writer = await asyncio.open_connection(
                 self.target_host, self.target_port
@@ -658,6 +655,16 @@ class TesteHeraclitusOrchestrator:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.target_host = config.get("target_host", "127.0.0.1")
+        if self.target_host not in LOOPBACK:
+            raise SystemExit(f"RECUSADO: target_host deve ser loopback, veio {self.target_host!r}")
+
+        for k in ["core_rest", "agent_api", "otlp", "mcp_gateway", "upstream_hits"]:
+            if k in config:
+                url = config[k]
+                u = urlsplit(url)
+                if u.hostname not in LOOPBACK:
+                    raise SystemExit(f"RECUSADO: {k} deve apontar para loopback, veio {url!r}")
+
         self.target_port = config.get("target_port", 9000)
         self.pid = config.get("target_pid", os.getpid())
         self.cli_binary = config.get("cli_binary", "./target/release/heraclitus-cli")
