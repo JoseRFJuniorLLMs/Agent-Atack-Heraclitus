@@ -411,12 +411,12 @@ class Lab:
                 "reachable" if reachable else "closed",
                 True,
                 blocked=False,
-                detail="reachability nao equivale a utorizacao gRPC",
+                detail="reachability não equivale a autorização gRPC",
                 duration_ms=ms,
                 severity="info",
                 tags=["grpc", "surface"],
             )
-       )
+        )
 
     def otlp_parser_matrix(self):
         cases = [
@@ -496,7 +496,7 @@ class Lab:
         )
         status, body, ms = self.request(
             self.cfg["mcp_gateway"], "/mcp", "POST", req, self.mcp_headers()
-       )
+        )
         after = self.tool_hits("exec")
         delta = after - before if before is not None and after is not None else None
         ok = status == 403 and delta in {0, None}
@@ -516,7 +516,7 @@ class Lab:
                 severity="critical",
                 tags=["mcp", "policy", "deny"],
             )
-       )
+        )
 
         aid = self.attack_id("mcp-allow")
         before = self.tool_hits("lookup_vendor")
@@ -545,6 +545,7 @@ class Lab:
         )
 
     def jsonrpc_edge_matrix(self):
+        # Batch misto: um allow + um deny. O exec jamais pode chegar ao stub.
         aid = self.attack_id("mcp-batch")
         before_exec = self.tool_hits("exec")
         batch = [
@@ -564,7 +565,7 @@ class Lab:
                 aid,
                 "jsonrpc-batch-bypass",
                 "mcp:batch",
-                "exec upstream_delta=0",
+                "exec upstreamΔ=0",
                 f"HTTP {status}",
                 ok,
                 status=status,
@@ -578,8 +579,9 @@ class Lab:
             )
         )
 
+        # Ferramenta visualmente parecida com exec: deve cair no default deny.
         for label, tool_name in [
-            ("unicode-confusable", "﵅��xec"),
+            ("unicode-confusable", "ｅxec"),  # full-width e
             ("case-variant", "EXEC"),
             ("whitespace-tool", " exec "),
         ]:
@@ -610,12 +612,14 @@ class Lab:
                 )
             )
 
+        # JSON duplicado para detectar divergência de parser. O último valor é
+        # benigno no parser Python; o exec não pode ser observado no upstream.
         aid = self.attack_id("duplicate-json-key")
         before_exec = self.tool_hits("exec")
         raw = (
             '{"jsonrpc":"2.0","id":"%s","method":"tools/call",'
             '"params":{"name":"exec","name":"lookup_vendor",'
-            "arguments":{"vendor":"dup-key-control"}}}' % aid
+            '"arguments":{"vendor":"dup-key-control"}}}' % aid
         )
         status, body, ms = self.request(
             self.cfg["mcp_gateway"],
@@ -648,6 +652,8 @@ class Lab:
             )
         )
 
+        # Métodos não-tool continuam sendo medidos, mas não tratados como bypass
+        # de exec. O objetivo é saber se a superfície está auditada.
         for method in ["resources/read", "prompts/get"]:
             aid = self.attack_id(method.replace("/", "-"))
             before = self.method_hits(method)
@@ -740,7 +746,7 @@ class Lab:
                 severity="critical",
                 tags=["identity", "fail-closed"],
             )
-       )
+        )
 
     def _request_approval(self, aid: str, agent: str, amount: int = 75000):
         req = self.tool(aid, "send_payment", {"amount": amount, "account": "synthetic-only"})
@@ -750,7 +756,7 @@ class Lab:
             "POST",
             req,
             self.mcp_headers(agent=agent, run=f"{self.campaign}-{agent}"),
-       )
+        )
         approval = None
         try:
             approval = body["error"]["data"]["heraclitus"]["approval_id"]
@@ -826,7 +832,7 @@ class Lab:
                 reason_code=self.reason(body2),
                 blocked=status2 != 200,
                 upstream_delta=(delta1 or 0) + (delta2 or 0),
-                detail=f"approval={approval[:18]}...",
+                detail=f"approval={approval[:18]}…",
                 duration_ms=ms,
                 severity="critical",
                 agent_id=agent,
@@ -968,7 +974,7 @@ class Lab:
                 args = {"command": "echo SAFE_MARKER", "i": i}
             else:
                 tool_name = "lookup_vendor"
-                args = {"vendor": f"mixed-{i"}
+                args = {"vendor": f"mixed-{i}"}
             req = self.tool(f"{aid}-{i}", tool_name, args)
             return tool_name, self.request(
                 self.cfg["mcp_gateway"],
@@ -1015,7 +1021,7 @@ class Lab:
                 severity="critical",
                 tags=["concurrency", "policy", "isolation"],
             )
-       )
+        )
 
     def multi_agent_swarm(self):
         aid = self.attack_id("swarm")
@@ -1040,7 +1046,7 @@ class Lab:
                 req = {"jsonrpc": "2.0", "id": rid, "method": "tools/call", "params": {}}
                 expected = "block"
             elif persona == "unicode-confusable":
-                req = self.tool(rid, "﵅��xec", {"command": "echo SAFE_MARKER"})
+                req = self.tool(rid, "ｅxec", {"command": "echo SAFE_MARKER"})
                 expected = "block"
             elif persona == "parser-fuzzer":
                 headers["Content-Type"] = "text/plain"
@@ -1191,7 +1197,7 @@ class Lab:
                 severity="critical",
                 tags=["policy", "reload", "fail-closed"],
             )
-       )
+        )
 
     def path_traversal_matrix(self):
         paths = [
@@ -1232,7 +1238,7 @@ class Lab:
         )
         health_status, _, _ = self.request(
             self.cfg["agent_api"], "/api/v1/agent/status", headers=self.auth_agent()
-       )
+        )
         ok = health_status == 200
         self.report(
             Result(
@@ -1259,7 +1265,7 @@ class Lab:
         )
         text = json.dumps(body, sort_keys=True) if isinstance(body, dict) else str(body)
         lower = text.lower()
-        unhealthy = "unhealthy" in lower or '"healthy': false' in lower
+        unhealthy = "unhealthy" in lower or '"healthy": false' in lower
         ok = status == 200 and not unhealthy
         detail = text[:240]
         self.report(
@@ -1277,7 +1283,7 @@ class Lab:
                 severity="high",
                 tags=["evidence", "health", "observability"],
             )
-       )
+        )
 
     def run(self):
         print(
