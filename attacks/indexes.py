@@ -1,0 +1,1 @@
+REQUIRED_SCENARIOS=("identical vectors at high cardinality","colinear vectors with concurrent reads","recall floor after adversarial topology insertion","temporal graph cycles with identical timestamps","bounded traversal termination")

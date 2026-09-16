@@ -1,0 +1,1 @@
+REQUIRED_SCENARIOS=("leader isolation while quorum writes are in flight","asymmetric follower links","membership/joint-consensus transitions where implemented","stale-term RPC rejection","snapshot catch-up after partition","durable restart without duplicate application")

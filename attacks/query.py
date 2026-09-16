@@ -1,0 +1,1 @@
+REQUIRED_SCENARIOS=("cartesian/query-state explosion bounded by resource limits","deep expression nesting","invalid IR virtual registers","malformed JIT opcode/state rejection","spill/cancel/recovery without process corruption")

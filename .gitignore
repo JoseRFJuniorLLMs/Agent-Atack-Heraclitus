@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
-reports/
-.env
 .venv/
+reports/latest/
+*.redteam.bak
+.DS_Store

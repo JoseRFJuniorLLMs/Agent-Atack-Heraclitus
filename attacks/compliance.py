@@ -1,0 +1,1 @@
+REQUIRED_SCENARIOS=("malformed ASN.1 DER timestamp tokens","expired/revoked chain behavior","unavailable revocation source behavior","Merkle receipt mutation detection","receipt verification after restart/export")

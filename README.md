@@ -1,107 +1,91 @@
-# Agent-Atack-Heraclitus v2
+# Agent-Atack-Heraclitus V3
 
-Suíte adversarial **autorizada, sintética e loopback-only** para qualificar o HeraclitusDB em uma máquina de desenvolvimento. O nome do repositório mantém a grafia original `Atack`.
+V3 é a campanha adversarial modular do HeraclitusDB. O harness continua **loopback-only por construção**: Core REST, Agent API, OTLP, MCP Gateway e upstream sintético precisam apontar para `localhost`, `127.0.0.1` ou `::1`. Não existe escape para alvo remoto.
 
-A v2 amplia o runner original para campanhas multiagente. Ela mede não apenas o HTTP devolvido pelo Heraclitus, mas também se uma chamada proibida realmente alcançou o upstream sintético e se a campanha foi persistida como evidência no Agent Black Box.
+## O que mudou
 
-## Regra de segurança do projeto
-
-O runner aceita somente `localhost`, `127.0.0.1` e `::1`. Não existe `--allow-remote`. Há limites rígidos para agentes, concorrência, iterações e tamanho de payload. O stub MCP nunca executa shell, filesystem, subprocessos ou rede externa. `exec` usa apenas marcadores como `echo SAFE_MARKER`, que o stub também não executa.
-
-Isso torna o projeto adequado para demonstração local sem transformar uma bancada de testes em scanner genérico de rede. A humanidade sobrevive mais um dia.
-
-## Novidades da v2
-
-A campanha agora inclui:
-
-- perfis `smoke`, `full` e `massive`;
-- swarm concorrente de múltiplos agentes com personas adversariais diferentes;
-- isolamento entre identidades usando colisão proposital de JSON-RPC ID;
-- corrida de consumo de approval, exigindo **exatamente uma** execução;
-- tentativa de reutilizar approval por outro agente;
-- carga concorrente misturando ALLOW e DENY para detectar cross-talk de policy;
-- JSON-RPC batch misto, Unicode confusable, case/whitespace variants e duplicate keys;
-- matriz OTLP com JSON malformado, UTF-8 inválido, BOM, charset e payload oversized;
-- fault injection do upstream sintético: atraso, HTTP 500 e resposta grande;
-- três variantes de path traversal em Evidence Bundles;
-- identity header oversized e health check pós-teste;
-- snapshot final da saúde do Agent Black Box;
-- contadores por `method` e por `tool` no stub para provar se `exec` chegou ou não ao upstream;
-- relatório JSON **e Markdown**;
-- correlação com `POST /api/v1/agent/red-team/events`, incluindo LSN quando a SPEC-0079 está disponível.
-
-## Perfis
-
-`smoke` roda uma qualificação curta. `full` é o padrão para desenvolvimento. `massive` usa mais agentes, iterações e concorrência, mas continua limitado pelos tetos compilados no runner.
-
-```bash
-python3 runner.py --config config.example.json --profile smoke
-python3 runner.py --config config.example.json --profile full
-python3 runner.py --config config.example.json --profile massive
-```
-
-Também é possível reduzir ou aumentar a carga dentro dos limites locais:
-
-```bash
-python3 runner.py --config config.example.json \
-  --profile massive --agents 48 --iterations 10 --concurrency 48
-```
-
-## Credenciais
-
-Credenciais não são gravadas no JSON de configuração nem nos relatórios.
-
-```bash
-export HERACLITUS_CORE_USERNAME='admin'
-read -s HERACLITUS_CORE_PASSWORD && export HERACLITUS_CORE_PASSWORD
-
-read -s HERACLITUS_AGENT_TOKEN && export HERACLITUS_AGENT_TOKEN
-```
-
-## Demo local
-
-Primeiro suba o HeraclitusDB apontando o MCP Gateway para o stub local em `127.0.0.1:19000`. Depois:
-
-```bash
-python3 stub_upstream.py --port 19000
-./run_demo.sh config.example.json full
-```
-
-Ou, para a campanha pesada:
-
-```bash
-./run_demo.sh config.example.json massive
-```
-
-O stub expõe:
+A V2 era essencialmente uma bateria de probes no `runner.py`. A V3 separa fronteiras porque segurança de protocolo, concorrência, storage físico e consenso são problemas diferentes.
 
 ```text
-GET  /hits   contador compatível com a v1
-GET  /stats  hits, by_method, by_tool e últimas chamadas
-POST /reset  zera apenas o estado sintético do stub
+v3_runner.py
+attacks/
+  common.py       transporte, IDs, upstream delta, evidência
+  gateway.py      Unicode, method confusion, reentrancy, policy race, approvals
+  protocol.py     duplicate keys, NUL, partial body, chunked fragmentation
+  resource.py     conexões lentas limitadas, churn, RSS/threads/FDs
+  storage.py      bitrot/truncation SOMENTE em cópia descartável marcada
+  source.py       orquestra adversarial suites internas do HeraclitusDB
+  raft.py         matriz de consenso/failover
+  indexes.py      matriz HNSW/grafo temporal
+  compliance.py   matriz RFC3161/DER/Merkle
+  query.py        matriz Hume IR/kernel/JIT
+metrics/process_probe.py
+integrity/verify.py
+reporting.py
 ```
 
-## Como interpretar um PASS
+## Suites
 
-Um `403` sozinho não basta. Para um teste como `mcp-policy-deny`, a condição é também `exec upstreamΔ=0`. Assim, uma regressão que devolva erro ao agente mas ainda encaminhe a ação para o upstream falha na campanha.
+### Edge, padrão seguro
 
-Para approvals, o teste de corrida dispara vários retries concorrentes depois da aprovação e exige apenas um `200` e apenas um hit de `send_payment` no stub.
+```bash
+./run_v3.sh config.example.json --suite edge
+```
+
+Inclui homógrafos Unicode e zero-width em nomes de tools, divergência `mcp-method` versus corpo JSON-RPC, reentrância na mesma sessão, corrida de consumo de approval, duplicate JSON keys, NUL framing, conexão interrompida durante body, request chunked fragmentado e confusão de `Content-Type`.
+
+### Stress local
+
+```bash
+./run_v3.sh config.example.json --suite stress --stress --server-pid "$(cat /path/to/heraclitus.pid)"
+```
+
+Executa campanha multiagente mista, corrida com policy reload inválida, conexões lentas limitadas e churn TCP. A V3 mede RSS, número de threads e descritores em Linux quando um PID é fornecido. Os limites são deliberadamente finitos.
+
+### Auditoria de código-fonte Heraclitus
+
+```bash
+./run_v3.sh config.example.json --suite source --source-dir ../HeraclitusDB
+```
+
+Orquestra suites reais dos crates `heraclitus-raft`, `heraclitus-core`, `heraclitus-log`, `heraclitus-compliance`, índices e Hume. Para Raft a feature `replication` é ligada explicitamente, porque o próprio crate documenta que `cargo test --workspace` sem a feature pode parecer cobertura apesar de não executar a suíte de consenso.
+
+### Storage destrutivo, apenas cópia descartável
+
+Crie uma **cópia** do diretório de dados e marque-a:
+
+```bash
+cp -a /dados/heraclitus /tmp/heraclitus-redteam-copy
+touch /tmp/heraclitus-redteam-copy/.heraclitus-redteam-disposable
+./run_v3.sh config.example.json --suite destructive \
+  --destructive-sandbox /tmp/heraclitus-redteam-copy \
+  --source-dir ../HeraclitusDB
+```
+
+Sem o marcador `.heraclitus-redteam-disposable`, a V3 recusa tocar nos arquivos. Ela faz bitflip e truncation em um candidato, executa `verify_command` e restaura o arquivo original, conferindo o SHA-256 após a restauração.
 
 ## Evidência
 
-Quando a API Red Team da SPEC-0079 está ativa, cada resultado é enviado para:
+Cada cenário recebe um `attack_id`. Quando a SPEC-0079 está disponível, o resultado é enviado para `/api/v1/agent/red-team/events`; isso é **telemetria do harness**, não prova independente. Em paralelo, a V3 consulta a API nativa de evidência configurada por `native_evidence_path`. O relatório diferencia `native_evidence=true`, `false` e `null`.
 
-```text
-POST /api/v1/agent/red-team/events
-```
+Todo cenário também mede `upstream_delta` quando o stub está ativo. Um `403` com `upstream_delta=1` é falha.
 
-O relatório mostra o LSN retornado. Esses registros de laboratório devem ser correlacionados com evidência nativa do HeraclitusDB, como decisões de policy, approval, deny e external effect. O depoimento do atacante não substitui a prova nativa, porque até software de segurança merece não ser juiz de si mesmo.
+## Relatórios
 
-## Testes do próprio runner
+Cada execução gera `report.json`, `report.md` e `junit.xml`. Não existe “security score” ornamental. A saída traz PASS, FAIL e o que não pôde ser verificado.
+
+## Credenciais
+
+Nada sensível entra em JSON ou relatório. Use ambiente:
 
 ```bash
-python3 -m unittest discover -s tests -v
-python3 -m py_compile runner.py stub_upstream.py
+export HERACLITUS_CORE_USERNAME=admin
+read -s HERACLITUS_CORE_PASSWORD && export HERACLITUS_CORE_PASSWORD
+read -s HERACLITUS_AGENT_TOKEN && export HERACLITUS_AGENT_TOKEN
 ```
 
-Os testes garantem, entre outras coisas, que não exista escape para destino remoto e que os limites da campanha permaneçam ativos.
+Para Basic Auth da Agent API, também é aceito `HERACLITUS_AGENT_BASIC='usuario:senha'`.
+
+## Compatibilidade V2
+
+O `runner.py` da V2 continua no repositório para campanhas `smoke/full/massive`. A V3 entra por `v3_runner.py` e `run_v3.sh`, permitindo comparar resultados sem quebrar scripts existentes.
