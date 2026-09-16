@@ -21,20 +21,24 @@ class StorageTamper:
     def list_blocks(self) -> List[Path]:
         if not self.data_dir.exists():
             return []
-        return list(self.data_dir.glob("**/*.hrkb"))
+        return [p for p in self.data_dir.glob("**/*") if p.is_file() and (p.suffix in (".hrkb", ".hrkl") or ".active.hrkl" in p.name)]
 
     def list_manifests(self) -> List[Path]:
         if not self.data_dir.exists():
             return []
-        return list(self.data_dir.glob("**/*.manifest"))
+        return [p for p in self.data_dir.glob("**/*") if p.is_file() and (".manifest" in p.name or p.parent.name == "manifests")]
 
     def inject_bitrot(self, block_path: Path, flip_count: int = 4) -> Dict[str, Any]:
         """Altera bits no payload do bloco preservando o magic header."""
-        if not block_path.exists():
+        if not block_path.exists() or not block_path.is_file():
             return {"status": "SKIP", "reason": "block file does not exist"}
         size = block_path.stat().st_size
         if size < 64:
             return {"status": "SKIP", "reason": "block too small for bitrot"}
+
+        backup = block_path.with_suffix(block_path.suffix + ".orig.bak")
+        if not backup.exists():
+            shutil.copyfile(block_path, backup)
 
         offsets = random.sample(range(32, size), min(flip_count, size - 32))
         with open(block_path, "r+b") as f:
@@ -48,12 +52,13 @@ class StorageTamper:
             "status": "PASS",
             "file": str(block_path),
             "flipped_offsets": offsets,
-            "size": size
+            "size": size,
+            "backup": str(backup)
         }
 
     def simulate_torn_write(self, manifest_path: Path) -> Dict[str, Any]:
         """Trunca o manifesto na metade para testar recuperacao consistente."""
-        if not manifest_path.exists():
+        if not manifest_path.exists() or not manifest_path.is_file():
             return {"status": "SKIP", "reason": "manifest file does not exist"}
         size = manifest_path.stat().st_size
         if size <= 16:

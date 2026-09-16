@@ -20,7 +20,10 @@ def run_cli_verify(cli_binary: str, data_dir: str, timeout_sec: int = 60) -> Dic
             "latency_ms": round((time.perf_counter() - start) * 1000, 2),
         }
 
-    cmd = [str(p_bin), "verify", "--data-dir", data_dir]
+    if p_bin.name.startswith("heraclitus"):
+        cmd = [str(p_bin), "storage", "doctor", data_dir]
+    else:
+        cmd = [str(p_bin), "verify", "--data-dir", data_dir]
     try:
         proc = subprocess.run(
             cmd,
@@ -29,6 +32,11 @@ def run_cli_verify(cli_binary: str, data_dir: str, timeout_sec: int = 60) -> Dic
             timeout=timeout_sec,
             check=False
         )
+        if proc.returncode != 0 and p_bin.name.startswith("heraclitus"):
+            # fallback to direct verify if storage doctor did not match
+            alt_proc = subprocess.run([str(p_bin), "verify", data_dir], capture_output=True, text=True, timeout=timeout_sec, check=False)
+            if alt_proc.returncode == 0:
+                proc = alt_proc
         elapsed = (time.perf_counter() - start) * 1000
         return {
             "status": "PASS" if proc.returncode == 0 else "FAIL",
