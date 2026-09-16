@@ -6,7 +6,11 @@
   "otlp": "http://127.0.0.1:14318",
   "mcp_gateway": "http://127.0.0.1:18787",
   "upstream_hits": "http://127.0.0.1:19000/hits",
-  "campaign": "sandbox-demo",
-  "concurrency": 64,
+  "campaign": "local-redteam-demo",
+  "seed": 1337,
+  "agents": 12,
+  "iterations": 3,
+  "concurrency": 24,
+  "approval_racers": 16,
   "oversized_bytes": 5242880
 }
