@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
+import http.client
 import json
 import os
 import sys
@@ -53,8 +55,10 @@ class SuperRunnerV4:
             self.config.update(config)
 
         self.target_host = self.config.get("target_host", "127.0.0.1")
-        self.target_port = self.config.get("target_port", 9000)
-        self.agent_port = self.config.get("agent_port", 18080)
+        env_port = os.getenv("HERACLITUS_PORT")
+        self.target_port = int(env_port) if env_port else (7475 if self.config.get("target_port") == 9000 else self.config.get("target_port", 7475))
+        env_agent = os.getenv("HERACLITUS_AGENT_PORT")
+        self.agent_port = int(env_agent) if env_agent else (8080 if self.config.get("agent_port") == 18080 else self.config.get("agent_port", 8080))
         self.cli_binary = self.config.get("cli_binary", "./target/release/heraclitus-cli")
         self.data_dir = Path(self.config.get("data_dir", "./data"))
         self.reports_dir = Path(self.config.get("reports_dir", "./reports"))
@@ -78,6 +82,50 @@ class SuperRunnerV4:
             "data_dir": "./data"
         }
 
+    def emit_probe(self, attack_id: str, vector: str, target: str, status: str, details: str, sequence: int):
+        try:
+            agent_url = os.getenv("HERACLITUS_AGENT_URL", f"http://{self.target_host}:8080")
+            parsed = urlsplit(agent_url)
+            conn = http.client.HTTPConnection(parsed.hostname or "127.0.0.1", parsed.port or 8080, timeout=2)
+            payload = {
+                "attack_id": attack_id,
+                "campaign_id": f"v4_{self.profile_name}",
+                "vector": vector,
+                "target": target,
+                "phase": "result",
+                "result": status,
+                "expected": "PASS",
+                "reason_code": details[:120],
+                "blocked": (status == "PASS"),
+                "upstream_delta": 0 if status == "PASS" else 1,
+                "transport_status": 200 if status == "PASS" else 400,
+                "sequence": sequence
+            }
+            body = json.dumps(payload).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+                "User-Agent": "Agent-Atack-Heraclitus/v4"
+            }
+            token = os.getenv("HERACLITUS_AGENT_TOKEN", "").strip()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            else:
+                user = os.getenv("HERACLITUS_AGENT_USERNAME", "admin").strip()
+                pw = os.getenv("HERACLITUS_AGENT_PASSWORD", "debian23")
+                raw = base64.b64encode(f"{user}:{pw}".encode()).decode()
+                headers["Authorization"] = f"Basic {raw}"
+            conn.request("POST", "/api/v1/agent/red-team/events", body=body, headers=headers)
+            r = conn.getresponse()
+            if r.status in {200, 201}:
+                resp_data = json.loads(r.read().decode(errors="replace"))
+                lsn = resp_data.get("lsn")
+                if lsn is not None:
+                    print(f"      [HERACLITUS LOG] Probe v4 registrado no HRKL -> LSN: {lsn}")
+            conn.close()
+        except Exception:
+            pass
+
     async def execute_all(self) -> Dict[str, Any]:
         start_time = time.time()
         print(f"======================================================================")
@@ -97,6 +145,7 @@ class SuperRunnerV4:
         orch_v3 = v3.TesteHeraclitusOrchestrator({
             "target_host": self.target_host,
             "target_port": self.target_port,
+            "agent_port": self.agent_port,
             "cli_binary": self.cli_binary,
             "data_dir": str(self.data_dir),
             "reports_dir": str(self.reports_dir)
@@ -112,6 +161,7 @@ class SuperRunnerV4:
         dur_status, dur_detail = self.durability_oracle.verify_after_restart(mock_recovered)
         print(f"  [{'PASS' if dur_status == 'PASS' else 'FAIL'}] Durability Oracle: [{dur_status}] {dur_detail}")
         results["phases"]["durability_oracle"] = {"status": dur_status, "details": dur_detail}
+        self.emit_probe("TC-DUR", "durability_ack_oracle", f"http://{self.target_host}:{self.target_port}", dur_status, dur_detail, 20)
 
         # ─── Fase 3: Storage Tamper & Verificação Física Merkle ───────────────
         print("\n[+] FASE 3: Injeção Física em Storage (Bitrot, Torn Write & Doctor)...")
@@ -134,6 +184,7 @@ class SuperRunnerV4:
         print(f"  [{'PASS' if verify_res['status'] == 'PASS' else ('SKIP' if verify_res['status'] == 'SKIP' else 'FAIL')}] Storage Doctor/Verify: [{verify_res['status']}] {verify_res['stderr'] or verify_res['stdout'][:80]}")
         tamper_res["doctor_verify"] = verify_res
         results["phases"]["storage_tamper"] = tamper_res
+        self.emit_probe("TC-TAMPER", "storage_doctor_tamper", f"http://{self.target_host}:7475/verify", verify_res["status"], verify_res.get("stderr") or "Storage tamper check", 21)
 
         # ─── Fase 4: Estresse Concorrente EBR & B-Tree Keys ───────────────────
         print("\n[+] FASE 4: Estresse de Garbage Collection EBR e MemTable...")
@@ -141,6 +192,7 @@ class SuperRunnerV4:
         reverse_btree_res = await ebr.run_reverse_monotonic_keys(total_keys=50)
         print(f"  [OK] Reverse Monotonic Keys: {reverse_btree_res['successful']}/{reverse_btree_res['total_keys']} chaves inseridas ({reverse_btree_res['latency_ms']}ms)")
         results["phases"]["ebr_stress"] = reverse_btree_res
+        self.emit_probe("TC-EBR", "ebr_starvation_stress", f"http://{self.target_host}:{self.target_port}", "PASS" if reverse_btree_res["successful"] == reverse_btree_res["total_keys"] else "FAIL", f"{reverse_btree_res['successful']} keys", 22)
 
         # ─── Fase 5: Compliance RFC 3161 & Hume JIT ──────────────────────────
         print("\n[+] FASE 5: Fuzzing Criptográfico RFC 3161 e Hume JIT AST...")
@@ -148,11 +200,13 @@ class SuperRunnerV4:
         fuzz_res = compliance.test_asn1_fuzz_cycle(iterations=5)
         print(f"  [OK] ASN.1 DER Fuzzing: {fuzz_res['rejected_4xx']} rejeitados com 4xx, {fuzz_res['server_5xx']} erros 5xx (Resiliente: {fuzz_res['resilient']})")
         results["phases"]["compliance_fuzz"] = fuzz_res
+        self.emit_probe("TC-COMPL", "asn1_der_rfc3161_fuzzer", f"http://{self.target_host}:{self.target_port}", "PASS" if fuzz_res["resilient"] else "FAIL", f"rejected 4xx={fuzz_res['rejected_4xx']}", 23)
 
         hume = HumeDestructor(f"http://{self.target_host}:{self.target_port}")
         hume_res = hume.test_jit_malformed_ast()
         print(f"  [{'PASS' if hume_res['status'] == 'PASS' else 'FAIL'}] Hume JIT Malformed AST: [{hume_res['status']}] {hume_res['detail']}")
         results["phases"]["hume_jit"] = hume_res
+        self.emit_probe("TC-HUME", "hume_jit_malformed_ast", f"http://{self.target_host}:{self.target_port}", hume_res["status"], hume_res["detail"], 24)
 
         # ─── Fase 6: Raft Distributed Consensus Chaos ────────────────────────
         print("\n[+] FASE 6: Partições de Rede Raft & Joint Consensus...")
@@ -160,6 +214,7 @@ class SuperRunnerV4:
         raft_res = raft.simulate_joint_consensus_split("node-1", transition_duration_sec=0.1)
         print(f"  [OK] Joint Consensus Partition: Sem split-brain detectado (divergência={raft_res['committed_divergence']})")
         results["phases"]["raft_chaos"] = raft_res
+        self.emit_probe("TC-RAFT", "raft_joint_consensus_split", f"http://{self.target_host}:{self.target_port}", raft_res.get("status", "PASS"), f"divergence={raft_res['committed_divergence']}", 25)
 
         # Consolidação e relatório final
         elapsed_total = round(time.time() - start_time, 2)

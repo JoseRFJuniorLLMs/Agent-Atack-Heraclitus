@@ -18,6 +18,7 @@ Ataques cobertos:
 
 import argparse
 import asyncio
+import base64
 import http.client
 import json
 import os
@@ -459,14 +460,19 @@ i: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h]
         try:
             conn = http.client.HTTPConnection(target_host, agent_port, timeout=4)
             req_body = json.dumps({"document": billion_laughs})
+            headers = {"Content-Type": "application/json"}
+            token = os.getenv("HERACLITUS_AGENT_TOKEN", "").strip()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
             conn.request(
                 "POST",
                 "/api/v1/agent/policies/activate",
                 body=req_body.encode("utf-8"),
-                headers={"Content-Type": "application/json", "Authorization": "Bearer SAFE_TOKEN"}
+                headers=headers
             )
             resp = conn.getresponse()
             status = resp.status
+            body = resp.read().decode(errors="replace")
             conn.close()
             elapsed = (time.perf_counter() - start) * 1000
 
@@ -476,7 +482,7 @@ i: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h]
                     description="YAML Billion Laughs – Exaustão de CPU/Memória",
                     status="PASS",
                     latency_ms=round(elapsed, 2),
-                    details=f"Motor rejeitou política recursiva com HTTP {status} em {elapsed:.1f}ms.",
+                    details=f"Motor rejeitou política recursiva com HTTP {status} em {elapsed:.1f}ms: {body[:60]}",
                 )
             return TestCaseResult(
                 test_id="TC-08",
@@ -700,11 +706,57 @@ class TesteHeraclitusOrchestrator:
                     raise SystemExit(f"RECUSADO: {k} deve apontar para loopback, veio {url!r}")
 
         self.target_port = config.get("target_port", 9000)
+        self.agent_port = config.get("agent_port", int(os.getenv("HERACLITUS_AGENT_PORT", "8080")))
         self.pid = config.get("target_pid", os.getpid())
         self.cli_binary = config.get("cli_binary", "./target/release/heraclitus-cli")
         self.data_dir = config.get("data_dir", "./data")
         self.reports_dir = Path(config.get("reports_dir", "./reports"))
         self.reports_dir.mkdir(parents=True, exist_ok=True)
+
+    def emit_probe(self, res: TestCaseResult, vector: str, target: str, sequence: int):
+        try:
+            agent_url = os.getenv("HERACLITUS_AGENT_URL", f"http://{self.target_host}:8080")
+            parsed = urlsplit(agent_url)
+            conn = http.client.HTTPConnection(parsed.hostname or "127.0.0.1", parsed.port or 8080, timeout=2)
+            payload = {
+                "attack_id": res.test_id,
+                "campaign_id": "suite_v3",
+                "vector": vector,
+                "target": target,
+                "phase": "result",
+                "result": res.status,
+                "expected": "PASS",
+                "reason_code": res.details[:120],
+                "blocked": (res.status == "PASS"),
+                "upstream_delta": 0 if res.status == "PASS" else 1,
+                "transport_status": 200 if res.status == "PASS" else 400,
+                "sequence": sequence
+            }
+            body = json.dumps(payload).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+                "User-Agent": "Agent-Atack-Heraclitus/v3"
+            }
+            token = os.getenv("HERACLITUS_AGENT_TOKEN", "").strip()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            else:
+                user = os.getenv("HERACLITUS_AGENT_USERNAME", "admin").strip()
+                pw = os.getenv("HERACLITUS_AGENT_PASSWORD", "debian23")
+                raw = base64.b64encode(f"{user}:{pw}".encode()).decode()
+                headers["Authorization"] = f"Basic {raw}"
+            conn.request("POST", "/api/v1/agent/red-team/events", body=body, headers=headers)
+            r = conn.getresponse()
+            if r.status in {200, 201}:
+                raw_resp = r.read().decode(errors="replace")
+                resp_data = json.loads(raw_resp)
+                lsn = resp_data.get("lsn")
+                if lsn is not None:
+                    print(f"      [HERACLITUS LOG] Probe registrado no HRKL -> LSN: {lsn}")
+            conn.close()
+        except Exception:
+            pass
 
     async def execute(self):
         print(f"[*] Iniciando bateria TesteHeraclitusDB v3 contra {self.target_host}:{self.target_port}...")
@@ -726,37 +778,57 @@ class TesteHeraclitusOrchestrator:
         results: List[TestCaseResult] = []
 
         print("[*] TC-01: Idle channel timeout...")
-        results.append(await protocol_tester.test_idle_channel_timeout())
+        res_01 = await protocol_tester.test_idle_channel_timeout()
+        results.append(res_01)
+        self.emit_probe(res_01, "idle_channel_timeout", f"http://{self.target_host}:{self.target_port}", 1)
 
         print("[*] TC-02: Unicode homoglyph normalization...")
-        results.append(await protocol_tester.test_unicode_normalization_guardrails())
+        res_02 = await protocol_tester.test_unicode_normalization_guardrails()
+        results.append(res_02)
+        self.emit_probe(res_02, "unicode_homoglyphs", f"http://{self.target_host}:{self.target_port}", 2)
 
         print("[*] TC-03: Malformed JSON-RPC boundary...")
-        results.append(await protocol_tester.test_malformed_json_rpc_boundary())
+        res_03 = await protocol_tester.test_malformed_json_rpc_boundary()
+        results.append(res_03)
+        self.emit_probe(res_03, "malformed_json_boundary", f"http://{self.target_host}:{self.target_port}", 3)
 
         print("[*] TC-04: Concurrent load test...")
-        results.append(await concurrency_tester.test_concurrent_read_write_monotonicity())
+        res_04 = await concurrency_tester.test_concurrent_read_write_monotonicity()
+        results.append(res_04)
+        self.emit_probe(res_04, "concurrent_monotonic_load", f"http://{self.target_host}:{self.target_port}", 4)
 
         print("[*] TC-05: Storage integrity verification...")
-        results.append(StorageVerificationHook.run_verify(self.cli_binary, self.data_dir))
+        res_05 = StorageVerificationHook.run_verify(self.cli_binary, self.data_dir)
+        results.append(res_05)
+        self.emit_probe(res_05, "physical_integrity_verify", f"http://{self.target_host}:7475/verify", 5)
 
         print("[*] TC-06: Slowloris FD exhaustion...")
-        results.append(await slowloris.test_fd_exhaustion_slowloris())
+        res_06 = await slowloris.test_fd_exhaustion_slowloris()
+        results.append(res_06)
+        self.emit_probe(res_06, "slowloris_fd_exhaustion", f"http://{self.target_host}:{self.target_port}", 6)
 
         print("[*] TC-07: Epoch pinning attack...")
-        results.append(await epoch.test_epoch_pinning())
+        res_07 = await epoch.test_epoch_pinning()
+        results.append(res_07)
+        self.emit_probe(res_07, "epoch_pinning_starvation", f"http://{self.target_host}:{self.target_port}", 7)
 
         print("[*] TC-08: YAML Billion Laughs...")
         try:
-            results.append(YamlPoisonAttacker.test_yaml_billion_laughs(self.target_host, self.target_port))
+            res_08 = YamlPoisonAttacker.test_yaml_billion_laughs(self.target_host, self.agent_port)
         except Exception:
-            results.append(YamlPoisonAttacker.test_yaml_not_installed())
+            res_08 = YamlPoisonAttacker.test_yaml_not_installed()
+        results.append(res_08)
+        self.emit_probe(res_08, "yaml_billion_laughs", f"http://{self.target_host}:{self.agent_port}/api/v1/agent/policies/activate", 8)
 
         print("[*] TC-09: Manifest offset poisoning...")
-        results.append(await manifest.test_manifest_offset_poisoning())
+        res_09 = await manifest.test_manifest_offset_poisoning()
+        results.append(res_09)
+        self.emit_probe(res_09, "manifest_offset_poisoning", f"http://{self.target_host}:{self.target_port}", 9)
 
         print("[*] TC-10: Tool-call reentrancy...")
-        results.append(await reentracy.test_reentrant_tool_call())
+        res_10 = await reentracy.test_reentrant_tool_call()
+        results.append(res_10)
+        self.emit_probe(res_10, "tool_call_reentrancy", f"http://{self.target_host}:{self.target_port}", 10)
 
         await upstream.stop()
         metrics_post = telemetry.capture()

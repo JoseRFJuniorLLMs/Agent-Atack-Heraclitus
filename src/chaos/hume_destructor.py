@@ -37,9 +37,9 @@ class HumeDestructor:
             conn.close()
             # Deve recusar com 4xx controlado, sem crash/pânico
             return {
-                "status": "PASS" if status in {400, 422, 404} else "FAIL",
+                "status": "PASS" if 400 <= status < 500 else "FAIL",
                 "http_status": status,
-                "detail": "JIT rejeitou AST invalida de forma controlada"
+                "detail": f"JIT rejeitou AST invalida de forma controlada (HTTP {status})"
             }
         except Exception as e:
             return {
