@@ -1,0 +1,25 @@
+[Unit]
+Description=HeraclitusDB Adversarial & Resilience Chaos Lab (24/7 Perpetual Runner)
+After=network.target heraclitus-dev.service
+Wants=heraclitus-dev.service
+
+[Service]
+Type=simple
+User=junior
+Group=junior
+WorkingDirectory=/home/junior/Agent-Atack-Heraclitus
+Environment=PYTHONUNBUFFERED=1
+Environment=HERACLITUS_HOST=127.0.0.1
+Environment=HERACLITUS_PORT=7475
+Environment=HERACLITUS_AGENT_PORT=8080
+Environment=HERACLITUS_AGENT_URL=http://127.0.0.1:8080
+ExecStart=/usr/bin/python3 /home/junior/Agent-Atack-Heraclitus/perpetual_runner.py --profile full --delay 3.0
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
