@@ -10,24 +10,37 @@ from typing import Dict, Any
 
 def run_cli_verify(cli_binary: str, data_dir: str, timeout_sec: int = 60) -> Dict[str, Any]:
     start = time.perf_counter()
-    candidates = [
-        Path(cli_binary),
-        Path("./target/release/heraclitus"),
-        Path("./target/release/heraclitus-cli"),
-        Path("/mnt/d/DEV/HeraclitusDB/target/release/heraclitus"),
-        Path("/mnt/d/DEV/Agent-Atack-Heraclitus/target/release/heraclitus"),
-        Path("/mnt/d/DEV/Agent-Atack-Heraclitus/target/release/heraclitus-cli"),
-        Path("/home/junior/heraclitus-dev-rc-74f921f/bin/heraclitus"),
-    ]
-    env_bin = os.getenv("HERACLITUS_CLI_BIN")
-    if env_bin:
-        candidates.insert(0, Path(env_bin))
+    p_bin = Path(cli_binary)
+    if not p_bin.exists() or not p_bin.is_file():
+        if cli_binary in ("./target/release/heraclitus", "./target/release/heraclitus-cli", "heraclitus-cli", "heraclitus", ""):
+            candidates = [
+                Path("./target/release/heraclitus"),
+                Path("./target/release/heraclitus-cli"),
+                Path("/mnt/d/DEV/HeraclitusDB/target/release/heraclitus"),
+                Path("/mnt/d/DEV/Agent-Atack-Heraclitus/target/release/heraclitus"),
+                Path("/mnt/d/DEV/Agent-Atack-Heraclitus/target/release/heraclitus-cli"),
+                Path("/home/junior/heraclitus-dev-rc-74f921f/bin/heraclitus"),
+            ]
+            env_bin = os.getenv("HERACLITUS_CLI_BIN")
+            if env_bin:
+                candidates.insert(0, Path(env_bin))
+            p_bin = None
+            for c in candidates:
+                if c.exists() and c.is_file():
+                    p_bin = c
+                    break
+        else:
+            p_bin = None
 
-    p_bin = None
-    for c in candidates:
-        if c.exists() and c.is_file():
-            p_bin = c
-            break
+    if p_bin is None:
+        return {
+            "status": "SKIP",
+            "available": False,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": f"CLI binary '{cli_binary}' nao encontrado. Validacao fisica pulada.",
+            "latency_ms": round((time.perf_counter() - start) * 1000, 2),
+        }
 
     if p_bin is not None:
         if p_bin.name.startswith("heraclitus"):
