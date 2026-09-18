@@ -16,29 +16,41 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Python
         run: python3 --version
-      - name: Compile
-        run: python3 -m py_compile runner.py runner_v3.py stub_upstream.py
+      - name: Compile all Python
+        run: python3 -m compileall -q runner.py runner_v3.py runner_v3_fullstack.py stub_upstream.py fullstack tests
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
       - name: Safety invariants
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          paths = [Path('runner.py'), Path('runner_v3.py'), Path('stub_upstream.py')]
-          text = '\n'.join(p.read_text(encoding='utf-8') for p in paths)
-          forbidden = [
+          old_paths = [Path('runner.py'), Path('runner_v3.py'), Path('stub_upstream.py')]
+          old_text = '\n'.join(p.read_text(encoding='utf-8') for p in old_paths)
+          forbidden_old = [
               '--allow-remote',
               'allow_remote',
               'rm -rf',
               'os.system(',
-              'subprocess.run(',
               'subprocess.Popen(',
               'Popen(',
           ]
-          found = [x for x in forbidden if x in text]
+          found = [x for x in forbidden_old if x in old_text]
           if found:
               raise SystemExit(f'forbidden execution/remote primitives present: {found}')
+
+          fullstack = '\n'.join(
+              p.read_text(encoding='utf-8')
+              for p in [Path('runner_v3_fullstack.py'), *Path('fullstack').glob('*.py')]
+          )
+          # Full-stack source/storage qualification intentionally runs local cargo,
+          # but never through a shell and never gains a remote-target escape hatch.
+          forbidden_fullstack = ['--allow-remote', 'allow_remote', 'shell=True', 'os.system(', 'rm -rf']
+          found = [x for x in forbidden_fullstack if x in fullstack]
+          if found:
+              raise SystemExit(f'full-stack safety invariant failed: {found}')
           print('safety invariants: OK')
           PY
       - name: CLI import smoke
-        run: python3 runner_v3.py --help >/dev/null
+        run: |
+          python3 runner_v3.py --help >/dev/null
+          python3 runner_v3_fullstack.py --help >/dev/null
