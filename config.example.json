@@ -14,5 +14,10 @@
   "approval_racers": 16,
   "oversized_bytes": 5242880,
   "expect_data_methods_blocked": true,
-  "expect_correlation_header_limit": true
+  "expect_correlation_header_limit": true,
+  "slow_connections": 16,
+  "slow_hold_seconds": 1.5,
+  "connection_churn": 128,
+  "source_probe_timeout": 300,
+  "storage_verify_timeout": 60
 }
